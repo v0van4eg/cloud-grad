@@ -1,3 +1,0 @@
-token: y0__xCckZGSARjB3RMgs97P4hUf2Za7N5KO1g5KWDCuJ5FrCZ7gOA
-cloud-id: b1gmjlsenka24ksvre01
-folder-id: b1g00u19k2fc6qj4q9vk
