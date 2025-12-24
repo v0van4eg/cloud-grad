@@ -1,41 +1,46 @@
-# ========== RESOURCES ==========
-# 1. СЕТЬ
+# ========== NETWORKING RESOURCES ==========
+# VPC Network
 resource "yandex_vpc_network" "dream_platform_network" {
-  name = "dream-platform-network"
+  name        = var.network_name
+  description = "VPC network for Dream Platform infrastructure"
 }
 
-# 2. ПОДСЕТИ
+# Subnets
 resource "yandex_vpc_subnet" "dream_platform_subnet_a" {
-  name           = "dream-platform-subnet-a"
-  zone           = "ru-central1-a"
+  name           = var.subnet_names.subnet_a
+  zone           = var.zone
   network_id     = yandex_vpc_network.dream_platform_network.id
-  v4_cidr_blocks = ["10.1.0.0/24"]
+  v4_cidr_blocks = [var.subnet_cidrs.subnet_a]
+  description    = "Subnet A for Dream Platform infrastructure"
 }
 
 resource "yandex_vpc_subnet" "dream_platform_subnet_b" {
-  name           = "dream-platform-subnet-b"
+  name           = var.subnet_names.subnet_b
   zone           = "ru-central1-b"
   network_id     = yandex_vpc_network.dream_platform_network.id
-  v4_cidr_blocks = ["10.2.0.0/24"]
+  v4_cidr_blocks = [var.subnet_cidrs.subnet_b]
+  description    = "Subnet B for Dream Platform infrastructure"
 }
 
-# 3. ВИРТУАЛЬНАЯ МАШИНА
+# ========== COMPUTE RESOURCES ==========
+# Virtual Machines
 resource "yandex_compute_instance" "vm" {
-  count       = local.instance_count
-  name        = "ubuntu-vm-${count.index}"
-  platform_id = "standard-v3"
-  zone        = yandex_vpc_subnet.dream_platform_subnet_a.zone
+  count        = var.instance_count
+  name         = "${var.vm_name_prefix}-${count.index}"
+  platform_id  = var.platform_id
+  zone         = yandex_vpc_subnet.dream_platform_subnet_a.zone
+  hostname     = "${var.vm_name_prefix}-${count.index}.internal"
 
   resources {
-    cores         = 2
-    core_fraction = 20
-    memory        = 2
+    cores         = var.vm_cores
+    core_fraction = var.vm_core_fraction
+    memory        = var.vm_memory
   }
 
   boot_disk {
     initialize_params {
-      image_id = "fd883qojk2a3hruf8p7m"
-      size     = 10
+      image_id = var.image_id
+      size     = var.vm_disk_size
     }
   }
 
@@ -45,51 +50,55 @@ resource "yandex_compute_instance" "vm" {
   }
 
   metadata = {
-    ssh-keys = "ycuser:${file("~/.ssh/id_rsa.pub")}"
+    ssh-keys = "yc-user:${var.ssh_public_key}"
+  }
+
+  allow_stopping_for_update = true
+
+  lifecycle {
+    ignore_changes = [
+      metadata["ssh-keys"]  # Ignore changes to SSH keys after creation to prevent unnecessary updates
+    ]
   }
 }
 
-# 4. LOCKBOX (создаём 2 секрета без фиксированных имён)
-resource "yandex_lockbox_secret" "db_password_1" {}
+# ========== SECRET MANAGEMENT ==========
+# Using the db_users variable instead of hardcoded passwords
+resource "yandex_lockbox_secret" "db_passwords" {
+  for_each = var.db_users
+  name     = "db-password-${each.key}"
+  description = "Database password for user ${each.key}"
+}
 
-resource "yandex_lockbox_secret_version" "db_password_1_version" {
-  secret_id = yandex_lockbox_secret.db_password_1.id
+resource "yandex_lockbox_secret_version" "db_password_versions" {
+  for_each  = var.db_users
+  secret_id = yandex_lockbox_secret.db_passwords[each.key].id
+
   entries {
-    key        = "postgresql_password"
-    text_value = "Grifonid1"
+    key        = "password"
+    text_value = each.value
   }
 }
 
-resource "yandex_lockbox_secret" "db_password_2" {}
-
-resource "yandex_lockbox_secret_version" "db_password_2_version" {
-  secret_id = yandex_lockbox_secret.db_password_2.id
-  entries {
-    key        = "postgresql_password"
-    text_value = "Grifonid1"
-  }
+# ========== CONTAINER REGISTRY ==========
+resource "yandex_container_registry" "dream_platform_registry" {
+  name        = var.registry_name
+  description = "Container registry for Dream Platform"
 }
 
-
-# 5. CONTAINER REGISTRY
-resource "yandex_container_registry" "docker_registry" {
-  name = "dream-platform-registry"
-}
-
-
-
-# 8. POSTGRESQL CLUSTER
+# ========== DATABASE RESOURCES ==========
+# PostgreSQL Cluster
 resource "yandex_mdb_postgresql_cluster" "dream_platform_db" {
-  name        = "dream-platform-db"
+  name        = var.db_cluster_name
   environment = "PRODUCTION"
   network_id  = yandex_vpc_network.dream_platform_network.id
 
   config {
-    version = 15
+    version = var.db_version
     resources {
-      resource_preset_id = "s2.micro"
-      disk_type_id       = "network-ssd"
-      disk_size          = 10
+      resource_preset_id = var.db_resource_preset
+      disk_type_id       = var.db_disk_type
+      disk_size          = var.db_disk_size
     }
   }
 
@@ -97,38 +106,29 @@ resource "yandex_mdb_postgresql_cluster" "dream_platform_db" {
     zone      = yandex_vpc_subnet.dream_platform_subnet_b.zone
     subnet_id = yandex_vpc_subnet.dream_platform_subnet_b.id
   }
+
+  depends_on = [
+    yandex_vpc_subnet.dream_platform_subnet_b
+  ]
 }
 
-# 9. ПЕРВЫЙ ПОЛЬЗОВАТЕЛЬ БД
-resource "yandex_mdb_postgresql_user" "kirill_morozov" {
+# PostgreSQL Users
+resource "yandex_mdb_postgresql_user" "db_users" {
+  for_each   = var.db_users
   cluster_id = yandex_mdb_postgresql_cluster.dream_platform_db.id
-  name       = "kirill_morozov"
-  password   = "Grifonid1"
+  name       = each.key
+  password   = each.value
 }
 
-# 10. НОВЫЙ ПОЛЬЗОВАТЕЛЬ БД
-resource "yandex_mdb_postgresql_user" "appuser" {
+# PostgreSQL Database
+resource "yandex_mdb_postgresql_database" "dream_platform_db_database" {
   cluster_id = yandex_mdb_postgresql_cluster.dream_platform_db.id
-  name       = "appuser"
-  password   = "Grifonid1"
+  name       = var.db_database_name
+  owner      = yandex_mdb_postgresql_user.db_users["kirill_morozov"].name
 }
 
-# 11. POSTGRESQL DATABASE
-resource "yandex_mdb_postgresql_database" "dream_platform" {
-  cluster_id = yandex_mdb_postgresql_cluster.dream_platform_db.id
-  name       = "dream-platform"
-  owner      = yandex_mdb_postgresql_user.kirill_morozov.name
-}
-
-# ========== ЛОКАЛЬНЫЕ ЗНАЧЕНИЯ ==========
+# ========== LEGACY SUPPORT ==========
+# Keep these outputs for backward compatibility with existing references
 locals {
-  instance_count = 1
-  ssh_public_key = file("~/.ssh/id_rsa.pub")
-}
-
-# ========== ПЕРЕМЕННЫЕ ==========
-variable "service_account_id" {
-  description = "ID сервисного аккаунта для управления бакетами"
-  type        = string
-  default     = "ajeomb05ohoh6mafogio"
+  instance_count = var.instance_count
 }
